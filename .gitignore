@@ -1,0 +1,10 @@
+# Dépendances
+node_modules/
+
+# Fichiers d'environnement et de secrets
+.env
+serviceAccountKey.json
+
+# Fichiers temporaires et logs
+uploads/
+*.log
