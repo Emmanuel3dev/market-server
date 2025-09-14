@@ -36,6 +36,13 @@ cloudinary.config({
 });
 
 // --- Multer config ---
+
+// Créer le dossier 'uploads' s'il n'existe pas
+const uploadDir = 'uploads';
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir);
+  console.log(`✅ Dossier '${uploadDir}' créé.`);
+}
 const upload = multer({ dest: 'uploads/' });
 
 // ====================
@@ -128,6 +135,119 @@ app.post('/delete-product', async (req, res) => {
   } catch (err) {
     console.error('❌ Erreur de suppression complète:', err);
     res.status(500).json({ error: 'Erreur de suppression' });
+  }
+});
+
+// =====================
+// === ROUTES STORIES ====
+// =====================
+
+app.post('/stories/create', upload.single('storyImage'), async (req, res) => {
+ 
+  const imageFile = req.file;
+
+ 
+
+  try {
+     const {
+      boutiqueId,
+      categorieId,
+      storyType,
+      content, // pour le texte
+      price, // pour l'image
+      description, // pour l'image
+      styleInfo, // pour le texte
+    } = req.body;
+
+    if (!boutiqueId || !categorieId || !storyType) {
+      return res.status(400).json({ error: 'boutiqueId, categorieId, et storyType sont requis.' });
+    }
+    const boutiqueRef = db.collection('categories').doc(categorieId).collection('boutiques').doc(boutiqueId);
+    const boutiqueDoc = await boutiqueRef.get();
+
+    if (!boutiqueDoc.exists) {
+      return res.status(404).json({ error: 'Boutique non trouvée.' });
+    }
+
+    const boutiqueData = boutiqueDoc.data();
+    const isPremium = boutiqueData.premium === true;
+
+    // --- Vérification des limites de stories ---
+    if (!isPremium) {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const tomorrow = new Date(today);
+      tomorrow.setDate(tomorrow.getDate() + 1);
+
+      const storiesSnapshot = await boutiqueRef.collection('stories')
+        .where('timestamp', '>=', today)
+        .where('timestamp', '<', tomorrow)
+        .get();
+
+      if (storiesSnapshot.size >= 3) {
+        return res.status(403).json({ error: 'Limite de 3 stories par jour atteinte pour les comptes non-premium.' });
+      }
+    }
+
+    // --- Préparation des données de la story ---
+    const storyData = {
+      storyType,
+      timestamp: admin.firestore.FieldValue.serverTimestamp(),
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 heures à partir de maintenant
+      views: [],
+      likes: [],
+    };
+
+    if (storyType === 'image') {
+      if (!imageFile) {
+        return res.status(400).json({ error: 'Un fichier image est requis pour une story image.' });
+      }
+      // Traitement et upload de l'image vers Cloudinary
+      const compressedPath = `uploads/compressed_story_${Date.now()}.jpg`;
+      await sharp(imageFile.path)
+        .resize({ width: 1080 }) // Bonne résolution pour les stories
+        .jpeg({ quality: 85 })
+        .toFile(compressedPath);
+
+      const result = await cloudinary.uploader.upload(compressedPath);
+
+      // Nettoyage des fichiers locaux
+      fs.unlinkSync(imageFile.path);
+      fs.unlinkSync(compressedPath);
+
+      storyData.imageUrl = result.secure_url;
+      storyData.publicId = result.public_id;
+      storyData.price = price || null;
+      storyData.description = description || null;
+
+    } else if (storyType === 'text') {
+      if (!content) {
+        return res.status(400).json({ error: 'Le contenu est requis pour une story texte.' });
+      }
+      storyData.content = content;
+      storyData.styleInfo = styleInfo ? JSON.parse(styleInfo) : {}; // ex: { background: 'gradient1', font: 'font3', size: 24 }
+    } else {
+      return res.status(400).json({ error: 'storyType invalide.' });
+    }
+
+    // --- Sauvegarde dans Firestore ---
+    await boutiqueRef.collection('stories').add(storyData);
+
+    // --- Notifier les abonnés (optionnel, mais bon pour l'engagement) ---
+    console.log(`✅ Story créée pour la boutique ${boutiqueId}. Pensez à notifier les abonnés.`);
+
+    res.status(201).json({ message: 'Story créée avec succès.' });
+
+  } catch (err) {
+    console.error('❌ Erreur lors de la création de la story:', err);
+    // Nettoyer le fichier uploadé en cas d'erreur s'il existe
+    if (imageFile && fs.existsSync(imageFile.path)) {
+      fs.unlinkSync(imageFile.path);
+    }
+     // Renvoyer une erreur JSON claire
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Échec de la création de la story.', details: err.message });
+    }
   }
 });
 
@@ -377,6 +497,68 @@ app.post('/send-to-boutique/:id', async (req, res) => {
     res.status(200).send('✅ Notification envoyée à la boutique');
   } catch (error) {
     console.error('❌ Erreur envoi à boutique:', error);
+    res.status(500).send('❌ Erreur serveur');
+  }
+});
+
+// Envoyer une notification pour un like sur une story
+app.post('/notify/story-like', async (req, res) => {
+  const { boutiqueOwnerId, likerName, boutiqueName } = req.body;
+  if (!boutiqueOwnerId || !likerName || !boutiqueName) {
+    return res.status(400).json({ error: 'boutiqueOwnerId, likerName, et boutiqueName sont requis.' });
+  }
+
+  try {
+    const userDoc = await db.collection('user').doc(boutiqueOwnerId).get();
+    if (!userDoc.exists) return res.status(404).send('Propriétaire de boutique non trouvé.');
+
+    const token = userDoc.data().token;
+    if (!token) return res.status(400).send('Le propriétaire de la boutique n\'a pas de token FCM.');
+
+    const message = {
+      notification: {
+        title: '❤️ Nouveau like !',
+        body: `${likerName} a aimé votre story pour ${boutiqueName}.`
+      },
+      token,
+    };
+
+    await admin.messaging().send(message);
+    res.status(200).send('✅ Notification de like de story envoyée.');
+
+  } catch (error) {
+    console.error('❌ Erreur envoi notif story like:', error);
+    res.status(500).send('❌ Erreur serveur');
+  }
+});
+
+// Envoyer une notification pour un like sur un commentaire de story
+app.post('/notify/comment-like', async (req, res) => {
+  const { commentOwnerId, boutiqueName } = req.body;
+  if (!commentOwnerId || !boutiqueName) {
+    return res.status(400).json({ error: 'commentOwnerId et boutiqueName sont requis.' });
+  }
+
+  try {
+    const userDoc = await db.collection('user').doc(commentOwnerId).get();
+    if (!userDoc.exists) return res.status(404).send('Auteur du commentaire non trouvé.');
+
+    const token = userDoc.data().token;
+    if (!token) return res.status(400).send('L\'auteur du commentaire n\'a pas de token FCM.');
+
+    const message = {
+      notification: {
+        title: `❤️ ${boutiqueName} a réagi`,
+        body: `${boutiqueName} a aimé votre commentaire.`
+      },
+      token,
+    };
+
+    await admin.messaging().send(message);
+    res.status(200).send('✅ Notification de like de commentaire envoyée.');
+
+  } catch (error) {
+    console.error('❌ Erreur envoi notif comment like:', error);
     res.status(500).send('❌ Erreur serveur');
   }
 });
