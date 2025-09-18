@@ -1,10 +1,11 @@
 # Dépendances
 node_modules/
 
-# Fichiers d'environnement et de secrets
+# Fichiers d'environnement locaux
 .env
+
+# Fichiers de clés de service sensibles
 serviceAccountKey.json
 
-# Fichiers temporaires et logs
-uploads/
-*.log
+# Dossier d'uploads temporaires
+/uploads

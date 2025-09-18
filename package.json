@@ -1,25 +1,21 @@
 {
   "name": "serveur_node_upload",
   "version": "1.0.0",
+  "description": "Serveur pour l'application Market",
   "main": "server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "Serveur MARKET pour images et notifications",
   "dependencies": {
-    "body-parser": "^2.2.0",
-    "cloudinary": "^2.7.0",
+    "cloudinary": "^2.2.0",
     "cors": "^2.8.5",
-    "dotenv": "^17.2.2",
-    "express": "^5.1.0",
-    "firebase-admin": "^13.4.0",
-    "imgur": "^2.5.0",
-    "mega": "^0.2.0",
-    "multer": "^2.0.2",
-    "sharp": "^0.34.3"
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "firebase-admin": "^12.1.0",
+    "multer": "^1.4.5-lts.1",
+    "sharp": "^0.33.4"
   }
 }

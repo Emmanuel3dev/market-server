@@ -87,54 +87,65 @@ app.delete('/delete/:publicId', async (req, res) => {
   }
 });
 
-// Supprimer image + produits associés dans Firestore
+// Supprimer image + produits associés dans Firestore (version optimisée et fortifiée)
 app.post('/delete-product', async (req, res) => {
   const { publicId } = req.body;
 
+  // ✅ 1. Validation des données d'entrée
   if (!publicId) {
-    return res.status(400).json({ error: 'publicId requis' });
+    return res.status(400).json({ error: 'Le champ publicId est requis.' });
   }
 
+  // ✅ 2. Bloc try...catch pour une gestion d'erreur globale
   try {
-    await cloudinary.uploader.destroy(publicId);
-    console.log(`✅ Image supprimée de Cloudinary: ${publicId}`);
-
-    const categoriesSnapshot = await db.collection('categories').get();
-    let totalDeleted = 0;
-
-    for (const categorieDoc of categoriesSnapshot.docs) {
-      const boutiquesSnapshot = await db
-        .collection('categories')
-        .doc(categorieDoc.id)
-        .collection('boutiques')
-        .get();
-
-      for (const boutiqueDoc of boutiquesSnapshot.docs) {
-        const produitsRef = db
-          .collection('categories')
-          .doc(categorieDoc.id)
-          .collection('boutiques')
-          .doc(boutiqueDoc.id)
-          .collection('produits');
-
-        const produitsSnapshot = await produitsRef
-          .where('publicId', '==', publicId)
-          .get();
-
-        for (const produitDoc of produitsSnapshot.docs) {
-          await produitsRef.doc(produitDoc.id).delete();
-          totalDeleted++;
-          console.log(`🗑️ Produit supprimé: ${produitDoc.id}`);
-        }
-      }
+    // ✅ 3. Suppression de l'image sur Cloudinary
+    const cloudinaryResult = await cloudinary.uploader.destroy(publicId);
+    
+    // On vérifie si la suppression a réussi ou si l'image n'existait pas.
+    // Dans les deux cas, on continue pour nettoyer la base de données.
+    if (cloudinaryResult.result !== 'ok' && cloudinaryResult.result !== 'not found') {
+        console.warn(`Avertissement Cloudinary: ${cloudinaryResult.result} pour publicId ${publicId}. Tentative de nettoyage de la base de données quand même.`);
+    } else {
+        console.log(`✅ Image supprimée (ou non trouvée) sur Cloudinary: ${publicId}`);
     }
 
+    // ✅ 4. Utilisation d'une requête collectionGroup pour trouver tous les produits
+    const productsQuery = db.collectionGroup('produits').where('publicId', '==', publicId);
+    const productsSnapshot = await productsQuery.get();
+
+    if (productsSnapshot.empty) {
+      return res.status(200).json({
+        message: 'Image traitée sur Cloudinary. Aucun produit correspondant trouvé dans la base de données.',
+      });
+    }
+
+    // ✅ 5. Utilisation d'un batch pour supprimer tous les documents en une seule fois
+    const batch = db.batch();
+    let totalDeleted = 0;
+
+    productsSnapshot.forEach(doc => {
+      // Supprime le produit de la sous-collection (ex: categories/.../boutiques/.../produits)
+      batch.delete(doc.ref);
+      
+      // Supprime le produit de la collection dénormalisée `produits` à la racine
+      const denormalizedProductRef = db.collection('produits').doc(doc.id);
+      batch.delete(denormalizedProductRef);
+
+      totalDeleted++;
+      console.log(`🗑️ Produit marqué pour suppression (ID: ${doc.id})`);
+    });
+
+    await batch.commit();
+    console.log(`🔥 ${totalDeleted} produit(s) supprimé(s) de Firestore.`);
+
+    // ✅ 6. Réponse de succès standardisée
     res.status(200).json({
-      message: `✅ Image + ${totalDeleted} produit(s) supprimé(s)`,
+      message: `Image et ${totalDeleted} produit(s) associé(s) supprimés avec succès.`,
     });
   } catch (err) {
-    console.error('❌ Erreur de suppression complète:', err);
-    res.status(500).json({ error: 'Erreur de suppression' });
+    // ✅ 7. Réponse d'erreur standardisée
+    console.error('❌ Erreur lors de la suppression complète du produit:', err);
+    res.status(500).json({ error: 'Une erreur interne est survenue lors de la suppression du produit.' });
   }
 });
 
@@ -142,112 +153,95 @@ app.post('/delete-product', async (req, res) => {
 // === ROUTES STORIES ====
 // =====================
 
+// Route pour créer une story (image ou texte)
 app.post('/stories/create', upload.single('storyImage'), async (req, res) => {
- 
-  const imageFile = req.file;
-
- 
-
+  // ✅ 1. Bloc try...catch pour une gestion d'erreur globale
+  let publicId; // Déclaré ici pour être accessible dans le bloc catch
   try {
-     const {
+    const {
       boutiqueId,
       categorieId,
       storyType,
-      content, // pour le texte
-      price, // pour l'image
-      description, // pour l'image
-      styleInfo, // pour le texte
+      content,
+      styleInfo,
+      price,
+      description,
+      availability,
     } = req.body;
 
+    // ✅ 2. Validation des données essentielles
     if (!boutiqueId || !categorieId || !storyType) {
-      return res.status(400).json({ error: 'boutiqueId, categorieId, et storyType sont requis.' });
-    }
-    const boutiqueRef = db.collection('categories').doc(categorieId).collection('boutiques').doc(boutiqueId);
-    const boutiqueDoc = await boutiqueRef.get();
-
-    if (!boutiqueDoc.exists) {
-      return res.status(404).json({ error: 'Boutique non trouvée.' });
+      return res.status(400).json({
+        error: 'Les champs boutiqueId, categorieId et storyType sont requis.',
+      });
     }
 
-    const boutiqueData = boutiqueDoc.data();
-    const isPremium = boutiqueData.premium === true;
+    let imageUrl;
 
-    // --- Vérification des limites de stories ---
-    if (!isPremium) {
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const tomorrow = new Date(today);
-      tomorrow.setDate(tomorrow.getDate() + 1);
-
-      const storiesSnapshot = await boutiqueRef.collection('stories')
-        .where('timestamp', '>=', today)
-        .where('timestamp', '<', tomorrow)
-        .get();
-
-      if (storiesSnapshot.size >= 3) {
-        return res.status(403).json({ error: 'Limite de 3 stories par jour atteinte pour les comptes non-premium.' });
-      }
-    }
-
-    // --- Préparation des données de la story ---
-    const storyData = {
-      storyType,
-      timestamp: admin.firestore.FieldValue.serverTimestamp(),
-      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 heures à partir de maintenant
-      views: [],
-      likes: [],
-    };
-
+    // ✅ 3. Logique spécifique au type de story
     if (storyType === 'image') {
-      if (!imageFile) {
-        return res.status(400).json({ error: 'Un fichier image est requis pour une story image.' });
+      if (!req.file) {
+        return res.status(400).json({ error: 'Un fichier image est requis pour une story de type image.' });
       }
-      // Traitement et upload de l'image vers Cloudinary
-      const compressedPath = `uploads/compressed_story_${Date.now()}.jpg`;
-      await sharp(imageFile.path)
-        .resize({ width: 1080 }) // Bonne résolution pour les stories
-        .jpeg({ quality: 85 })
-        .toFile(compressedPath);
-
-      const result = await cloudinary.uploader.upload(compressedPath);
-
-      // Nettoyage des fichiers locaux
-      fs.unlinkSync(imageFile.path);
-      fs.unlinkSync(compressedPath);
-
-      storyData.imageUrl = result.secure_url;
-      storyData.publicId = result.public_id;
-      storyData.price = price || null;
-      storyData.description = description || null;
-
+      // Upload sur Cloudinary
+      const result = await cloudinary.uploader.upload(req.file.path, {
+        folder: 'stories',
+      });
+      imageUrl = result.secure_url;
+      publicId = result.public_id;
+      // Supprime le fichier temporaire du serveur
+      fs.unlinkSync(req.file.path);
     } else if (storyType === 'text') {
       if (!content) {
-        return res.status(400).json({ error: 'Le contenu est requis pour une story texte.' });
+        return res.status(400).json({ error: 'Le champ content est requis pour une story de type texte.' });
       }
-      storyData.content = content;
-      storyData.styleInfo = styleInfo ? JSON.parse(styleInfo) : {}; // ex: { background: 'gradient1', font: 'font3', size: 24 }
     } else {
       return res.status(400).json({ error: 'storyType invalide.' });
     }
 
-    // --- Sauvegarde dans Firestore ---
-    await boutiqueRef.collection('stories').add(storyData);
+    // ✅ 4. Préparation des données pour Firestore
+    const storyData = {
+      storyType,
+      timestamp: admin.firestore.FieldValue.serverTimestamp(),
+      expiresAt: admin.firestore.Timestamp.fromDate(new Date(Date.now() + 24 * 60 * 60 * 1000)), // Expire dans 24h
+      views: [],
+      likes: [],
+    };
 
-    // --- Notifier les abonnés (optionnel, mais bon pour l'engagement) ---
-    console.log(`✅ Story créée pour la boutique ${boutiqueId}. Pensez à notifier les abonnés.`);
-
-    res.status(201).json({ message: 'Story créée avec succès.' });
-
-  } catch (err) {
-    console.error('❌ Erreur lors de la création de la story:', err);
-    // Nettoyer le fichier uploadé en cas d'erreur s'il existe
-    if (imageFile && fs.existsSync(imageFile.path)) {
-      fs.unlinkSync(imageFile.path);
+    // Ajout des champs spécifiques au type
+    if (storyType === 'image') {
+      storyData.imageUrl = imageUrl;
+      storyData.publicId = publicId;
+      if (price) storyData.price = parseFloat(price);
+      if (description) storyData.description = description;
+      if (availability) storyData.availability = parseInt(availability, 10);
+    } else { // 'text'
+      storyData.content = content;
+      if (styleInfo) storyData.styleInfo = JSON.parse(styleInfo);
     }
-     // Renvoyer une erreur JSON claire
-    if (!res.headersSent) {
-      res.status(500).json({ error: 'Échec de la création de la story.', details: err.message });
+
+    // ✅ 5. Écriture dans la base de données
+    await db.collection('categories').doc(categorieId).collection('boutiques').doc(boutiqueId).collection('stories').add(storyData);
+
+    // ✅ 6. Réponse de succès standardisée
+    return res.status(201).json({ message: 'Story créée avec succès' });
+
+  } catch (error) {
+    console.error('❌ Erreur lors de la création de la story:', error);
+
+    // Si une image a été uploadée mais que l'écriture Firestore a échoué,
+    // on essaie de la supprimer de Cloudinary pour ne pas laisser de "fantômes".
+    if (publicId) {
+      try {
+        await cloudinary.uploader.destroy(publicId);
+        console.log(`🧹 Nettoyage de l'image Cloudinary ${publicId} réussi.`);
+      } catch (cleanupError) {
+        console.error(`❌ Échec du nettoyage de l'image Cloudinary ${publicId}:`, cleanupError);
+      }
     }
+    
+    // ✅ 7. Réponse d'erreur standardisée
+    return res.status(500).json({ error: 'Une erreur interne est survenue sur le serveur.' });
   }
 });
 
@@ -257,11 +251,16 @@ app.post('/stories/create', upload.single('storyImage'), async (req, res) => {
 
 // Envoyer une notification FCM à un token unique
 app.post('/send-notification', async (req, res) => {
-  // On récupère aussi `recipientId` pour sauvegarder la notification
   const { token, title, body, recipientId, scheduleAt } = req.body;
 
+  // ✅ 1. Validation des données d'entrée
+  if (!token || !title || !body) {
+    return res.status(400).json({ error: 'Les champs token, title, et body sont requis.' });
+  }
+
+  // ✅ 2. Bloc try...catch global
   try {
-    // ✅ Sauvegarder la notification dans Firestore pour l'utilisateur destinataire
+    // Sauvegarder la notification dans Firestore pour l'utilisateur destinataire
     if (recipientId) {
       try {
         await db.collection('user').doc(recipientId).collection('notifications').add({
@@ -272,14 +271,13 @@ app.post('/send-notification', async (req, res) => {
         });
         console.log(`✅ Notification sauvegardée pour l'utilisateur: ${recipientId}`);
       } catch (dbError) {
+        // On ne bloque pas l'envoi de la notif si la sauvegarde échoue, mais on le signale.
         console.error(`❌ Erreur de sauvegarde de la notification pour ${recipientId}:`, dbError);
       }
     }
+
     const message = {
-      notification: {
-        title,
-        body,
-      },
+      notification: { title, body },
       token,
     };
 
@@ -290,36 +288,40 @@ app.post('/send-notification', async (req, res) => {
       const delay = scheduleTime.getTime() - now.getTime();
 
       if (delay > 0) {
-        // Planifie l'envoi avec un délai (non persistant si le serveur redémarre)
+        // NOTE: setTimeout n'est pas persistant. Si le serveur redémarre, la notification planifiée sera perdue.
+        // Pour une solution robuste, utiliser un service de cron-job (ex: node-cron, ou un service cloud).
         setTimeout(async () => {
           try {
             await admin.messaging().send(message);
             console.log(`✅ Notification planifiée envoyée à ${token}`);
           } catch (error) {
             console.error(`❌ Erreur envoi notif planifiée à ${token}:`, error);
+            if (error.code === 'messaging/registration-token-not-registered') {
+              cleanupInvalidToken(token);
+            }
           }
         }, delay);
-        res.status(200).send('✅ Notification planifiée');
+        // ✅ 3. Réponse JSON standardisée
+        return res.status(202).json({ message: 'Notification planifiée avec succès.' }); // 202 Accepted
       } else {
         // Si l'heure est déjà passée, on envoie immédiatement
         await admin.messaging().send(message);
-        res.status(200).send('✅ Notification envoyée (heure planifiée passée)');
+        return res.status(200).json({ message: 'Notification envoyée (heure planifiée passée).' });
       }
     } else {
       // Envoi immédiat
       await admin.messaging().send(message);
-      res.status(200).send('✅ Notification envoyée');
+      return res.status(200).json({ message: 'Notification envoyée avec succès.' });
     }
   } catch (error) {
-    // ✅ Gérer les tokens invalides
+    // ✅ 4. Gestion d'erreur centralisée
     if (error.code === 'messaging/registration-token-not-registered') {
       console.warn(`Token FCM invalide détecté: ${token}. Il sera supprimé.`);
-      // On ne bloque pas la réponse pour la suppression, on le fait en arrière-plan
-      cleanupInvalidToken(token);
-      res.status(404).send(`Le token de l'appareil n'est plus enregistré.`);
+      cleanupInvalidToken(token); // Tâche de fond
+      return res.status(404).json({ error: "Le token de l'appareil n'est plus valide." });
     } else {
-      console.error('❌ Erreur envoi notif :', error);
-      res.status(500).send('❌ Erreur serveur');
+      console.error('❌ Erreur lors de l\'envoi de la notification:', error);
+      return res.status(500).json({ error: 'Une erreur interne est survenue lors de l\'envoi de la notification.' });
     }
   }
 });
@@ -328,23 +330,29 @@ app.post('/send-notification', async (req, res) => {
 app.post('/send-global-users', async (req, res) => {
   const { title, body } = req.body;
 
+  // ✅ 1. Validation
+  if (!title || !body) {
+    return res.status(400).json({ error: 'Les champs title et body sont requis.' });
+  }
+
+  // ✅ 2. Bloc try...catch
   try {
-    // ✅ La collection est 'user' (et non 'users')
     const usersSnapshot = await db.collection('user').get();
     const tokens = [];
-    const userIds = []; // ✅ Garder les IDs des utilisateurs
-    const tokenMap = {}; // Pour retrouver le doc.id à partir du token
+    const userIds = [];
+    const tokenToUserIdMap = {}; // Pour retrouver le doc.id à partir du token
+
     usersSnapshot.forEach(doc => {
-      const token = doc.data().token;
-      if (token) {
-        tokens.push(token);
-        userIds.push(doc.id); // ✅
-        tokenMap[token] = doc.id;
+      const data = doc.data();
+      if (data.token) {
+        tokens.push(data.token);
+        userIds.push(doc.id);
+        tokenToUserIdMap[data.token] = doc.id;
       }
     });
 
     if (tokens.length === 0) {
-      return res.status(400).send('Aucun utilisateur avec token FCM');
+      return res.status(404).json({ error: 'Aucun utilisateur avec un token FCM trouvé.' });
     }
 
     const message = {
@@ -354,7 +362,7 @@ app.post('/send-global-users', async (req, res) => {
 
     const response = await admin.messaging().sendMulticast(message);
 
-    // ✅ Sauvegarder la notification pour chaque utilisateur
+    // Sauvegarde des notifications en batch
     if (userIds.length > 0) {
       const batch = db.batch();
       const notificationPayload = {
@@ -371,27 +379,36 @@ app.post('/send-global-users', async (req, res) => {
       console.log(`✅ Notifications globales sauvegardées pour ${userIds.length} utilisateurs.`);
     }
 
-    // ✅ Nettoyage des tokens invalides
+    // Nettoyage des tokens invalides
     if (response.failureCount > 0) {
       const failedTokens = [];
       response.responses.forEach((resp, idx) => {
         if (!resp.success && resp.error.code === 'messaging/registration-token-not-registered') {
           const invalidToken = tokens[idx];
           failedTokens.push(invalidToken);
-          const userId = tokenMap[invalidToken];
+          const userId = tokenToUserIdMap[invalidToken];
           if (userId) {
-            console.log(`Token invalide pour l'utilisateur ${userId}. Suppression...`);
+            console.log(`Token invalide pour l'utilisateur ${userId}. Suppression en arrière-plan...`);
+            // On ne bloque pas la réponse pour la suppression
             db.collection('user').doc(userId).update({ token: admin.firestore.FieldValue.delete() });
           }
         }
       });
-      console.log('Tokens invalides supprimés:', failedTokens);
+      console.log('Nettoyage de tokens invalides terminé pour:', failedTokens);
     }
 
-    res.status(200).send(`✅ Notification globale envoyée à ${response.successCount}/${tokens.length} utilisateurs`);
+    // ✅ 3. Réponse JSON standardisée
+    return res.status(200).json({
+      message: `Notification globale envoyée.`,
+      successCount: response.successCount,
+      failureCount: response.failureCount,
+      totalTokens: tokens.length,
+    });
+
   } catch (error) {
-    console.error('❌ Erreur envoi global users:', error);
-    res.status(500).send('❌ Erreur serveur');
+    // ✅ 4. Gestion d'erreur centralisée
+    console.error('❌ Erreur lors de l\'envoi de la notification globale aux utilisateurs:', error);
+    return res.status(500).json({ error: 'Une erreur interne est survenue.' });
   }
 });
 
@@ -590,6 +607,294 @@ async function cleanupInvalidToken(token) {
     console.error(`Erreur lors du nettoyage du token ${token}:`, e);
   }
 }
+// ========================
+// === ROUTES LECTURE API ===
+// ========================
+
+// --- Obtenir les produits (avec filtres et pagination) ---
+app.get('/products', async (req, res) => {
+  try {
+    const { categorieId, search, page = 1, limit = 20 } = req.query;
+    const pageNum = parseInt(page, 10);
+    const limitNum = parseInt(limit, 10);
+
+    let query = db.collection('produits').where('disponibe', '==', true);
+
+    // Filtre par catégorie
+    if (categorieId) {
+      query = query.where('categorieId', '==', categorieId);
+    }
+
+    // Filtre par recherche (commence par...)
+    if (search) {
+      const searchTerm = search.toLowerCase();
+      query = query
+        .where('nomLowercase', '>=', searchTerm)
+        .where('nomLowercase', '<=', searchTerm + '\uf8ff')
+        .orderBy('nomLowercase'); // L'orderBy est nécessaire pour un filtre de plage
+    } else {
+      // Tri par défaut : les produits premium d'abord, puis les plus récents
+      query = query.orderBy('isPremium', 'desc').orderBy('timestamp', 'desc');
+    }
+
+    // Pagination (Note: pour de très grandes collections, l'offset peut devenir lent)
+    query = query.limit(limitNum).offset((pageNum - 1) * limitNum);
+
+    const snapshot = await query.get();
+    if (snapshot.empty) {
+      return res.status(200).json([]);
+    }
+
+    const products = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    return res.status(200).json(products);
+  } catch (error) {
+    console.error('❌ Erreur lors de la récupération des produits:', error);
+    return res.status(500).json({ error: 'Une erreur interne est survenue.' });
+  }
+});
+
+
+
+// --- Obtenir les boutiques (pour la recherche) ---
+app.get('/boutiques', async (req, res) => {
+  try {
+    const { search, limit = 25 } = req.query;
+    const limitNum = parseInt(limit, 10);
+
+    // On commence par la collection `rechercheboutique` qui est optimisée pour ça.
+    let query = db.collection('rechercheboutique');
+
+    // On ne veut que les boutiques actives.
+    // Note: Firestore peut demander un index pour cette requête composée.
+    query = query.where('boutique_active', '==', true);
+
+    // Filtre par recherche (commence par...)
+    if (search && search.trim() !== '') {
+      const searchTerm = search.toLowerCase();
+      query = query
+        .where('nomLowercase', '>=', searchTerm)
+        .where('nomLowercase', '<=', searchTerm + '\uf8ff');
+    }
+
+    const snapshot = await query.limit(limitNum).get();
+    if (snapshot.empty) {
+      return res.status(200).json([]);
+    }
+
+    const boutiques = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    return res.status(200).json(boutiques);
+  } catch (error) {
+    console.error('❌ Erreur lors de la recherche des boutiques:', error);
+    return res.status(500).json({ error: 'Une erreur interne est survenue.' });
+  }
+});
+
+// --- Obtenir les détails d'une boutique (infos + produits) ---
+app.get('/categories/:categorieId/boutiques/:boutiqueId', async (req, res) => {
+  try {
+    const { categorieId, boutiqueId } = req.params;
+    if (!categorieId || !boutiqueId) {
+      return res.status(400).json({ error: 'Un ID de catégorie et de boutique sont requis.' });
+    }
+
+    // 1. Trouver la boutique avec un chemin direct (plus efficace)
+    const boutiqueRef = db.collection('categories').doc(categorieId).collection('boutiques').doc(boutiqueId);
+    const boutiqueDoc = await boutiqueRef.get();
+
+    if (!boutiqueDoc.exists) {
+      return res.status(404).json({ error: 'Boutique non trouvée.' });
+    }
+
+    const boutiqueData = boutiqueDoc.data();
+
+    // 2. Récupérer les produits de cette boutique, triés par épingle puis par date
+    const produitsSnapshot = await boutiqueDoc.ref.collection('produits').orderBy('epingle', 'desc').orderBy('timestamp', 'desc').get();
+    
+    const produits = produitsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+
+    // 3. Combiner les informations et renvoyer
+    const responseData = {
+      ...boutiqueData,
+      id: boutiqueDoc.id, // S'assurer que l'ID est bien dans la réponse
+      produits: produits,
+    };
+
+    // Convertir les Timestamps en chaînes ISO pour la cohérence JSON
+    if (responseData.activationExpiryDate && responseData.activationExpiryDate.toDate) {
+      responseData.activationExpiryDate = responseData.activationExpiryDate.toDate().toISOString();
+    }
+
+    return res.status(200).json(responseData);
+
+  } catch (error) {
+    console.error('❌ Erreur lors de la récupération des détails de la boutique:', error);
+    if (error.message && error.message.includes('index')) {
+        return res.status(500).json({ error: 'Une configuration de base de données (index) est requise. Veuillez consulter les logs du serveur.' });
+    }
+    return res.status(500).json({ error: 'Une erreur interne est survenue.' });
+  }
+});
+
+// --- Obtenir toutes les annonces actives ---
+app.get('/annonces', async (req, res) => {
+  try {
+    // On récupère les annonces en les triant par date de création.
+    const snapshot = await db.collection('annonces').orderBy('timestamp', 'desc').get();
+
+    if (snapshot.empty) {
+      return res.status(200).json([]);
+    }
+
+    const annonces = snapshot.docs.map(doc => {
+      const data = doc.data();
+      // Convertir le timestamp en chaîne ISO pour le JSON pour la cohérence
+      if (data.timestamp && data.timestamp.toDate) {
+        data.timestamp = data.timestamp.toDate().toISOString();
+      }
+      return { id: doc.id, ...data };
+    });
+
+    return res.status(200).json(annonces);
+
+  } catch (error) {
+    console.error('❌ Erreur lors de la récupération des annonces:', error);
+    return res.status(500).json({ error: 'Une erreur interne est survenue.' });
+  }
+});
+
+// --- Obtenir une annonce par son ID ---
+app.get('/annonces/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!id) {
+      return res.status(400).json({ error: 'Un ID d\'annonce est requis.' });
+    }
+
+    const docRef = db.collection('annonces').doc(id);
+    const doc = await docRef.get();
+
+    if (!doc.exists) {
+      return res.status(404).json({ error: 'Annonce non trouvée.' });
+    }
+
+    const annonceData = doc.data();
+    // Convertir le timestamp Firestore en chaîne ISO pour le JSON
+    if (annonceData.timestamp && annonceData.timestamp.toDate) {
+      annonceData.timestamp = annonceData.timestamp.toDate().toISOString();
+    }
+
+    return res.status(200).json({ id: doc.id, ...annonceData });
+  } catch (error) {
+    console.error('❌ Erreur lors de la récupération de l\'annonce:', error);
+    return res.status(500).json({ error: 'Une erreur interne est survenue.' });
+  }
+});
+
+
+// --- Obtenir les statistiques d'une boutique ---
+app.get('/categories/:categorieId/boutiques/:boutiqueId/stats', async (req, res) => {
+  try {
+    const { categorieId, boutiqueId } = req.params;
+    if (!categorieId || !boutiqueId) {
+      return res.status(400).json({ error: 'Un ID de catégorie et de boutique sont requis.' });
+    }
+
+    // 1. Trouver la boutique avec un chemin direct
+    const boutiqueRef = db.collection('categories').doc(categorieId).collection('boutiques').doc(boutiqueId);
+    const boutiqueDoc = await boutiqueRef.get();
+
+    if (!boutiqueDoc.exists) {
+      return res.status(404).json({ error: 'Boutique non trouvée.' });
+    }
+
+    // 2. Lancer toutes les requêtes de statistiques en parallèle pour l'efficacité
+    const [
+      abonnesSnapshot,
+      produitsSnapshot,
+      commandesSnapshot,
+      storiesSnapshot
+    ] = await Promise.all([
+      boutiqueRef.collection('abonnes').get(),
+      boutiqueRef.collection('produits').get(),
+      boutiqueRef.collection('commandes').get(),
+      boutiqueRef.collection('stories').where('expiresAt', '>', admin.firestore.Timestamp.now()).get()
+    ]);
+
+    // 3. Calculer les statistiques à partir des snapshots
+    
+    // Statistiques de base
+    const nombreAbonnes = abonnesSnapshot.size;
+    const nombreProduits = produitsSnapshot.size;
+    const nombreCommandes = commandesSnapshot.size;
+
+    // Statistiques sur les commandes
+    let revenusTotal = 0;
+    let totalNotes = 0;
+    let nombreNotes = 0;
+    const commandesParStatut = {
+      'en attente': 0,
+      'traité': 0,
+      'expédié': 0,
+      'livré': 0,
+      'reçu': 0,
+    };
+
+    commandesSnapshot.forEach(doc => {
+      const commande = doc.data();
+      
+      if (commande.statut === 'reçu' && commande.prixTotal) {
+        revenusTotal += Number(commande.prixTotal) || 0;
+      }
+
+      if (commande.note && commande.note > 0) {
+        totalNotes += Number(commande.note) || 0;
+        nombreNotes++;
+      }
+
+      if (commande.statut && commandesParStatut.hasOwnProperty(commande.statut)) {
+        commandesParStatut[commande.statut]++;
+      }
+    });
+
+    const noteMoyenne = nombreNotes > 0 ? totalNotes / nombreNotes : 0;
+
+    // Statistiques sur les stories
+    let totalVuesStories = 0;
+    let totalLikesStories = 0;
+    storiesSnapshot.forEach(doc => {
+        const story = doc.data();
+        if (story.views && Array.isArray(story.views)) {
+            totalVuesStories += story.views.length;
+        }
+        if (story.likes && Array.isArray(story.likes)) {
+            totalLikesStories += story.likes.length;
+        }
+    });
+
+    // 4. Assembler la réponse
+    const stats = {
+      nombreAbonnes,
+      nombreProduits,
+      nombreCommandes,
+      revenusTotal,
+      noteMoyenne: parseFloat(noteMoyenne.toFixed(2)),
+      nombreAvis: nombreNotes,
+      repartitionCommandes: commandesParStatut,
+      totalVuesStories,
+      totalLikesStories,
+      lastUpdated: new Date().toISOString(),
+    };
+
+    return res.status(200).json(stats);
+
+  } catch (error) {
+   console.error(`❌ Erreur lors de la récupération des statistiques pour la boutique ${req.params.boutiqueId}:`, error);
+    if (error.message && error.message.includes('index')) {
+        return res.status(500).json({ error: 'Une configuration de base de données (index) est requise. Veuillez consulter les logs du serveur.' });
+    }
+    return res.status(500).json({ error: 'Une erreur interne est survenue.' });
+  }
+});
 // ====================
 // === DEMARRAGE ======
 // ====================
