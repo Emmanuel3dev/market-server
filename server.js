@@ -167,12 +167,13 @@ app.post('/stories/create', upload.single('storyImage'), async (req, res) => {
       price,
       description,
       availability,
+      proprietaireId,
     } = req.body;
 
     // ✅ 2. Validation des données essentielles
-    if (!boutiqueId || !categorieId || !storyType) {
+    if (!boutiqueId || !categorieId || !storyType || !proprietaireId) {
       return res.status(400).json({
-        error: 'Les champs boutiqueId, categorieId et storyType sont requis.',
+        error: 'Les champs boutiqueId, categorieId, storyType et proprietaireId sont requis.',
       });
     }
 
@@ -206,6 +207,8 @@ app.post('/stories/create', upload.single('storyImage'), async (req, res) => {
       expiresAt: admin.firestore.Timestamp.fromDate(new Date(Date.now() + 24 * 60 * 60 * 1000)), // Expire dans 24h
       views: [],
       likes: [],
+      categorieId: categorieId,
+      proprietaireId: proprietaireId,
     };
 
     // Ajout des champs spécifiques au type
@@ -652,8 +655,6 @@ app.get('/products', async (req, res) => {
     return res.status(500).json({ error: 'Une erreur interne est survenue.' });
   }
 });
-
-
 
 // --- Obtenir les boutiques (pour la recherche) ---
 app.get('/boutiques', async (req, res) => {
