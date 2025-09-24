@@ -248,6 +248,41 @@ app.post('/stories/create', upload.single('storyImage'), async (req, res) => {
   }
 });
 
+// Route pour supprimer une story
+app.post('/stories/delete', async (req, res) => {
+  try {
+    const { storyId, boutiqueId, categoryId, publicId } = req.body;
+
+    // Validation
+    if (!storyId || !boutiqueId || !categoryId) {
+      return res.status(400).json({ error: 'Les IDs de story, boutique et catégorie sont requis.' });
+    }
+
+    // 1. Supprimer le document de Firestore
+    const storyRef = db.collection('categories').doc(categoryId).collection('boutiques').doc(boutiqueId).collection('stories').doc(storyId);
+    await storyRef.delete();
+    console.log(`🔥 Story ${storyId} supprimée de Firestore.`);
+
+    // 2. Si la story avait une image, la supprimer de Cloudinary
+    if (publicId) {
+      try {
+        await cloudinary.uploader.destroy(publicId);
+        console.log(`☁️ Image ${publicId} associée à la story supprimée de Cloudinary.`);
+      } catch (cloudinaryError) {
+        // On ne bloque pas la réponse si la suppression Cloudinary échoue, mais on le signale.
+        console.error(`⚠️ Erreur lors de la suppression de l'image Cloudinary ${publicId}:`, cloudinaryError);
+      }
+    }
+
+    return res.status(200).json({ message: 'Story supprimée avec succès.' });
+
+  } catch (error) {
+    console.error('❌ Erreur lors de la suppression de la story:', error);
+    return res.status(500).json({ error: 'Une erreur interne est survenue sur le serveur.' });
+  }
+});
+
+
 // ===========================
 // === ROUTE NOTIFICATION ====
 // ===========================
@@ -896,10 +931,67 @@ app.get('/categories/:categorieId/boutiques/:boutiqueId/stats', async (req, res)
     return res.status(500).json({ error: 'Une erreur interne est survenue.' });
   }
 });
+
+// ========================
+// === TÂCHES PLANIFIÉES ===
+// ========================
+
+/**
+ * Nettoie les stories expirées de toutes les boutiques.
+ * Cette fonction supprime également les images associées sur Cloudinary.
+ */
+async function cleanupExpiredStories() {
+  console.log(`[${new Date().toISOString()}] 🧹 Lancement du nettoyage des stories expirées...`);
+  const now = admin.firestore.Timestamp.now();
+  let storiesSupprimees = 0;
+
+  try {
+    // Utilise une collectionGroup pour trouver toutes les stories expirées dans l'ensemble de la base de données.
+    // Note: Firestore peut vous demander de créer un index pour cette requête. Suivez le lien dans le message d'erreur du terminal si nécessaire.
+    const expiredStoriesQuery = db.collectionGroup('stories').where('expiresAt', '<', now);
+    const snapshot = await expiredStoriesQuery.get();
+
+    if (snapshot.empty) {
+      console.log("🧹 Aucune story expirée à nettoyer.");
+      return;
+    }
+
+    const batch = db.batch();
+    const cloudinaryPublicIds = [];
+
+    snapshot.forEach(doc => {
+      const storyData = doc.data();
+      // Marque le document pour suppression dans le batch
+      batch.delete(doc.ref);
+      storiesSupprimees++;
+
+      // Si la story a une image sur Cloudinary, on stocke son publicId pour la supprimer
+      if (storyData.publicId) {
+        cloudinaryPublicIds.push(storyData.publicId);
+      }
+    });
+
+    // Exécute la suppression en batch dans Firestore
+    await batch.commit();
+    console.log(`🔥 ${storiesSupprimees} stories supprimées de Firestore.`);
+
+    // Supprime les images associées sur Cloudinary
+    if (cloudinaryPublicIds.length > 0) {
+      await cloudinary.api.delete_resources(cloudinaryPublicIds);
+      console.log(`☁️ ${cloudinaryPublicIds.length} images associées supprimées de Cloudinary.`);
+    }
+
+  } catch (error) {
+    console.error('❌ Erreur lors du nettoyage des stories expirées:', error);
+  }
+}
 // ====================
 // === DEMARRAGE ======
 // ====================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Serveur lancé sur le port ${PORT}`);
+  // Lance le nettoyage immédiatement au démarrage, puis toutes les heures.
+  cleanupExpiredStories();
+  setInterval(cleanupExpiredStories, 60 * 60 * 1000); // 1 heure
 });
