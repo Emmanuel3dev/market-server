@@ -1207,8 +1207,8 @@ async function findNearestCourier(boutiqueLat, boutiqueLng) {
       }
 
       // Calculer la distance
-      const courierLat = courier.currentPosition?.latitude;
-      const courierLng = courier.currentPosition?.longitude;
+      const courierLat = courier.positionActuelle?.latitude;
+      const courierLng = courier.positionActuelle?.longitude;
 
       console.log(`📍 Position livreur: ${courierLat}, ${courierLng}`);
 
