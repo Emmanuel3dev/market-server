@@ -933,6 +933,96 @@ app.get('/categories/:categorieId/boutiques/:boutiqueId/stats', async (req, res)
 });
 
 // ========================
+// === TÂCHES ABONNEMENTS ===
+// ========================
+
+/**
+ * Envoie des rappels pour les abonnements expirant bientôt.
+ */
+async function sendSubscriptionReminders() {
+  console.log(`[${new Date().toISOString()}] 📅 Vérification des rappels d'abonnements...`);
+  const now = new Date();
+  const sixDaysFromNow = new Date(now.getTime() + 6 * 24 * 60 * 60 * 1000);
+  const twoDaysFromNow = new Date(now.getTime() + 2 * 24 * 60 * 60 * 1000);
+
+  try {
+    // Abonnements expirant dans 6 jours
+    const sixDaysQuery = db.collection('subscriptions')
+      .where('status', '==', 'active')
+      .where('endDate', '>=', admin.firestore.Timestamp.fromDate(sixDaysFromNow))
+      .where('endDate', '<=', admin.firestore.Timestamp.fromDate(new Date(sixDaysFromNow.getTime() + 24 * 60 * 60 * 1000)));
+    const sixDaysSnapshot = await sixDaysQuery.get();
+
+    for (const doc of sixDaysSnapshot.docs) {
+      const sub = doc.data();
+      const userDoc = await db.collection('user').doc(sub.userId).get();
+      if (userDoc.exists && userDoc.data().token) {
+        const token = userDoc.data().token;
+        await admin.messaging().send({
+          notification: {
+            title: 'Rappel abonnement',
+            body: 'Votre abonnement expire dans 6 jours. Pensez à le renouveler !'
+          },
+          token,
+        });
+        console.log(`✅ Rappel 6 jours envoyé à ${sub.userId}`);
+      }
+    }
+
+    // Abonnements expirant dans 2 jours
+    const twoDaysQuery = db.collection('subscriptions')
+      .where('status', '==', 'active')
+      .where('endDate', '>=', admin.firestore.Timestamp.fromDate(twoDaysFromNow))
+      .where('endDate', '<=', admin.firestore.Timestamp.fromDate(new Date(twoDaysFromNow.getTime() + 24 * 60 * 60 * 1000)));
+    const twoDaysSnapshot = await twoDaysQuery.get();
+
+    for (const doc of twoDaysSnapshot.docs) {
+      const sub = doc.data();
+      const userDoc = await db.collection('user').doc(sub.userId).get();
+      if (userDoc.exists && userDoc.data().token) {
+        const token = userDoc.data().token;
+        await admin.messaging().send({
+          notification: {
+            title: 'Rappel abonnement',
+            body: 'Votre abonnement expire dans 2 jours. Renouvelez-le maintenant !'
+          },
+          token,
+        });
+        console.log(`✅ Rappel 2 jours envoyé à ${sub.userId}`);
+      }
+    }
+
+  } catch (error) {
+    console.error('❌ Erreur lors de l\'envoi des rappels d\'abonnements:', error);
+  }
+}
+
+/**
+ * Remet à zéro les compteurs quotidiens des utilisateurs abonnés.
+ */
+async function resetDailyCounters() {
+  console.log(`[${new Date().toISOString()}] 🔄 Remise à zéro des compteurs quotidiens...`);
+  try {
+    const usersSnapshot = await db.collection('user').get();
+    const batch = db.batch();
+
+    for (const userDoc of usersSnapshot.docs) {
+      const userId = userDoc.id;
+      const counterRef = db.collection('user_counters').doc(userId);
+      batch.set(counterRef, {
+        userId,
+        dailyOrdersUsed: 0,
+        lastResetDate: admin.firestore.Timestamp.now(),
+      }, { merge: true });
+    }
+
+    await batch.commit();
+    console.log(`✅ Compteurs remis à zéro pour ${usersSnapshot.size} utilisateurs.`);
+  } catch (error) {
+    console.error('❌ Erreur lors de la remise à zéro des compteurs:', error);
+  }
+}
+// ========================
 // === TÂCHES PLANIFIÉES ===
 // ========================
 
@@ -994,4 +1084,17 @@ app.listen(PORT, () => {
   // Lance le nettoyage immédiatement au démarrage, puis toutes les heures.
   cleanupExpiredStories();
   setInterval(cleanupExpiredStories, 60 * 60 * 1000); // 1 heure
+
+  // Tâches abonnements
+  sendSubscriptionReminders();
+  setInterval(sendSubscriptionReminders, 24 * 60 * 60 * 1000); // Tous les jours
+
+  // Remise à zéro des compteurs quotidiens à minuit
+  const now = new Date();
+  const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0, 0);
+  const timeToMidnight = midnight - now;
+  setTimeout(() => {
+    resetDailyCounters();
+    setInterval(resetDailyCounters, 24 * 60 * 60 * 1000); // Tous les jours à minuit
+  }, timeToMidnight);
 });
