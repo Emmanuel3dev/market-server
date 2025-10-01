@@ -1160,12 +1160,17 @@ function calculateDistance(lat1, lng1, lat2, lng2) {
  */
 async function findNearestCourier(boutiqueLat, boutiqueLng) {
   try {
+    console.log(`🔍 Recherche livreur pour position: ${boutiqueLat}, ${boutiqueLng}`);
+
     // Récupérer tous les livreurs disponibles
     const couriersSnapshot = await db.collection('couriers')
       .where('status', '==', 'available')
       .get();
 
+    console.log(`📊 ${couriersSnapshot.size} livreur(s) disponible(s) trouvé(s)`);
+
     if (couriersSnapshot.empty) {
+      console.log('❌ Aucun livreur disponible');
       return null;
     }
 
@@ -1174,33 +1179,61 @@ async function findNearestCourier(boutiqueLat, boutiqueLng) {
 
     for (const doc of couriersSnapshot.docs) {
       const courier = doc.data();
+      console.log(`\n🔍 Vérification livreur: ${doc.id} (${courier.prenom} ${courier.nom})`);
 
       // Vérifier les horaires de travail
       const now = new Date();
-      const dayOfWeek = now.toLocaleLowerCase('fr', { weekday: 'long' });
-      const horaires = courier.horaires?.[dayOfWeek];
+      const dayOfWeek = now.toLocaleDateString('fr', { weekday: 'long' }).toLowerCase();
+      console.log(`📅 Jour actuel: ${dayOfWeek}`);
 
-      if (!horaires?.actif) continue;
+      const horaires = courier.horaires?.[dayOfWeek];
+      console.log(`⏰ Horaires définis: ${horaires ? 'Oui' : 'Non'}`);
+
+      if (!horaires?.actif) {
+        console.log(`❌ Livreurr inactif aujourd'hui`);
+        continue;
+      }
 
       const currentTime = now.getHours() * 100 + now.getMinutes();
       const startTime = parseInt(horaires.debut.replace(':', ''));
       const endTime = parseInt(horaires.fin.replace(':', ''));
 
-      if (currentTime < startTime || currentTime > endTime) continue;
+      console.log(`🕐 Heure actuelle: ${Math.floor(currentTime/100)}:${(currentTime%100).toString().padStart(2,'0')}`);
+      console.log(`🕐 Plage horaire: ${horaires.debut} - ${horaires.fin}`);
+
+      if (currentTime < startTime || currentTime > endTime) {
+        console.log(`❌ Hors des horaires de travail`);
+        continue;
+      }
 
       // Calculer la distance
       const courierLat = courier.currentPosition?.latitude;
       const courierLng = courier.currentPosition?.longitude;
 
-      if (!courierLat || !courierLng) continue;
+      console.log(`📍 Position livreur: ${courierLat}, ${courierLng}`);
+
+      if (!courierLat || !courierLng) {
+        console.log(`❌ Position livreur invalide`);
+        continue;
+      }
 
       const distance = calculateDistance(boutiqueLat, boutiqueLng, courierLat, courierLng);
+      console.log(`📏 Distance: ${distance.toFixed(2)} km`);
 
       // Distance maximale de 20km
       if (distance <= 20 && distance < shortestDistance) {
+        console.log(`✅ Livreurr candidat trouvé !`);
         shortestDistance = distance;
         nearestCourier = { id: doc.id, ...courier, distance };
+      } else {
+        console.log(`❌ Distance trop grande ou plus loin que le candidat actuel`);
       }
+    }
+
+    if (nearestCourier) {
+      console.log(`\n🎯 Livreurr sélectionné: ${nearestCourier.prenom} ${nearestCourier.nom} (${nearestCourier.distance.toFixed(2)} km)`);
+    } else {
+      console.log(`\n❌ Aucun livreurr trouvé dans les critères`);
     }
 
     return nearestCourier;
