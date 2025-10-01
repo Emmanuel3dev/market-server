@@ -1,153 +1,107 @@
-# Gestion des Abonnements - Scripts de Maintenance
+# 🚀 Intégration Architecture Centralisée - Livraisons & Abonnements
 
-Ce dossier contient des scripts pour gérer les abonnements de livraison en local pendant les tests.
+## 📋 Vue d'ensemble des changements
 
-## Problèmes résolus
+Suite à l'implémentation du système de livraison et d'abonnement, l'architecture a été **centralisée côté serveur** pour améliorer la sécurité, les performances et la maintenabilité.
 
-### 1. Remise à zéro des compteurs quotidiens
-**Problème** : Le serveur n'étant pas déployé, les compteurs quotidiens ne se remettent pas à zéro automatiquement à minuit.
+## 🔄 Modifications apportées
 
-**Solution** : Scripts locaux pour gérer les compteurs manuellement.
+### 1. **Fusion des fichiers de maintenance**
+- ✅ `reset_counters.js` → Intégré dans `server.js`
+- ✅ `schedule_daily_reset.js` → Supprimé (fonctionnalité dans `server.js`)
 
-### 2. Jours restants bloqués
-**Problème** : Les jours restants d'abonnement restent figés (ex: 29 jours).
+### 2. **Nouvelle route API `/assign-delivery`**
+- **Endpoint** : `POST /assign-delivery`
+- **Fonction** : Assignation automatique de livreurs côté serveur
+- **Avantages** :
+  - ✅ Calcul de distance sécurisé côté backend
+  - ✅ Algorithme d'assignation centralisé
+  - ✅ Notifications push automatiques
+  - ✅ Mise à jour des statuts en temps réel
 
-**Cause possible** : Dates de fin incorrectes ou calcul erroné.
-
-**Solution** : Script de correction des dates d'abonnement.
-
-## Scripts disponibles
-
-### `reset_counters.js`
-Script principal pour gérer les compteurs et abonnements.
-
-#### Commandes disponibles :
-```bash
-# Remettre à zéro tous les compteurs quotidiens
-node reset_counters.js reset
-
-# Vérifier et marquer les abonnements expirés
-node reset_counters.js check
-
-# Corriger les dates de fin d'abonnement incorrectes
-node reset_counters.js fix
-
-# Afficher les statistiques des abonnements
-node reset_counters.js stats
-
-# Exécuter toutes les opérations
-node reset_counters.js all
-```
-
-#### Exemples d'utilisation :
-```bash
-# Après une journée de test, remettre les compteurs à zéro
-node reset_counters.js reset
-
-# Vérifier si des abonnements ont expiré
-node reset_counters.js check
-
-# Voir l'état actuel des abonnements
-node reset_counters.js stats
-
-# Maintenance complète (recommandé quotidiennement)
-node reset_counters.js all
-```
-
-### `schedule_daily_reset.js`
-Script qui s'exécute en continu et planifie automatiquement les tâches quotidiennes.
-
-#### Utilisation :
-```bash
-# Lancer le planificateur (reste actif jusqu'à arrêt)
-node schedule_daily_reset.js
-```
-
-Le script :
-- S'exécute immédiatement au lancement
-- Planifie la prochaine exécution à minuit
-- Continue indéfiniment jusqu'à arrêt manuel (Ctrl+C)
-
-## Dépannage
-
-### Les jours restants ne diminuent pas
-
-1. **Vérifier les dates** :
-   ```bash
-   node reset_counters.js stats
-   ```
-
-2. **Corriger si nécessaire** :
-   ```bash
-   node reset_counters.js fix
-   ```
-
-3. **Vérifier dans l'app** : Redémarrer l'app pour forcer le rechargement des données.
-
-### Les compteurs quotidiens ne se remettent pas à zéro
-
-1. **Remise à zéro manuelle** :
-   ```bash
-   node reset_counters.js reset
-   ```
-
-2. **Lancer le planificateur automatique** :
-   ```bash
-   node schedule_daily_reset.js
-   ```
-
-## Structure des données Firestore
-
-### Collection `subscriptions`
+### 3. **Tâches planifiées centralisées**
 ```javascript
+// Exécution quotidienne à minuit :
+- resetDailyCounters()      // Remise à zéro compteurs
+- checkExpiredSubscriptions() // Vérification expirations
+- fixSubscriptionEndDates()   // Correction dates
+- sendSubscriptionReminders() // Rappels utilisateurs
+```
+
+### 4. **Calcul côté serveur**
+- ✅ Distance GPS (formule Haversine)
+- ✅ Coût livraison (500 FCFA + 100/km)
+- ✅ Recherche livreur le plus proche
+- ✅ Vérification horaires de travail
+
+## 🏗️ Architecture avant/après
+
+### **Avant** (décentralisé)
+```
+Flutter App → DeliveryService → Calculs côté client → Firestore
+```
+
+### **Après** (centralisé)
+```
+Flutter App → API /assign-delivery → Calculs côté serveur → Firestore + Notifications
+```
+
+## 📊 Avantages de la centralisation
+
+| Aspect | Avant | Après |
+|--------|-------|-------|
+| **Sécurité** | Logique exposée côté client | Logique sécurisée côté serveur |
+| **Performance** | Calculs répétés côté mobile | Calculs optimisés côté serveur |
+| **Maintenance** | Code dupliqué | Code centralisé |
+| **Évolutivité** | Difficile à modifier | Facile à étendre |
+| **Monitoring** | Difficile | Logs centralisés |
+
+## 🔧 Utilisation de la nouvelle API
+
+### Requête d'assignation de livraison
+```javascript
+POST /assign-delivery
 {
-  userId: "string",
-  planType: "little|medium|high",
-  startDate: Timestamp,
-  endDate: Timestamp,
-  status: "active|expired",
-  renewalDiscountApplied: boolean
+  "boutiqueId": "boutique123",
+  "clientId": "user456",
+  "boutiquePosition": { "lat": 4.0511, "lng": 9.7679 },
+  "clientPosition": { "lat": 4.0611, "lng": 9.7779 },
+  "orderDetails": {
+    "commandeId": "cmd789",
+    "nomProduit": "Ordinateur portable",
+    "quantite": 1,
+    "prixTotal": 150000,
+    "clientNom": "Jean Dupont"
+  }
 }
 ```
 
-### Collection `user_counters`
+### Réponse de succès
 ```javascript
 {
-  userId: "string",
-  dailyOrdersUsed: number, // 0-16 selon plan
-  lastResetDate: Timestamp
+  "success": true,
+  "deliveryId": "delivery_1234567890_abc123",
+  "courierId": "courier789",
+  "courierName": "Marie Dubois",
+  "distance": 2.5,
+  "cost": 700,
+  "estimatedTime": 8
 }
 ```
 
-### Collection `subscription_requests`
-```javascript
-{
-  userId: "string",
-  requestedPlan: "little|medium|high",
-  requestDate: Timestamp,
-  status: "pending|approved|rejected",
-  adminNotes: "string"
-}
-```
+## 🚀 Déploiement
 
-## Logs et débogage
+1. **Redémarrer le serveur** : Les nouvelles fonctionnalités sont automatiquement actives
+2. **Mettre à jour l'app Flutter** : Utilise maintenant `ApiConfig.assignDeliveryUrl`
+3. **Tester** : Vérifier que les livraisons s'assignent automatiquement
 
-Les scripts affichent des logs détaillés :
-- `✅` : Opération réussie
-- `❌` : Erreur
-- `🔄` : Remise à zéro
-- `📅` : Abonnements
-- `📊` : Statistiques
+## 📈 Métriques à surveiller
 
-## Recommandations
+- **Taux de succès d'assignation** : % de livraisons assignées automatiquement
+- **Temps de réponse API** : Performance des calculs côté serveur
+- **Couverture géographique** : Rayon effectif des livreurs (20km max)
+- **Satisfaction utilisateurs** : Temps d'attente des livraisons
 
-1. **Test local** : Exécuter `node reset_counters.js all` quotidiennement
-2. **Production** : Ces scripts ne sont pas nécessaires une fois le serveur déployé
-3. **Sauvegarde** : Faire des sauvegardes Firestore avant les corrections massives
+---
 
-## Support
-
-En cas de problème, vérifier :
-1. La connexion Firebase
-2. Les permissions du service account
-3. Les données Firestore existantes
+**✅ Architecture optimisée et prête pour la production !**

@@ -1022,6 +1022,303 @@ async function resetDailyCounters() {
     console.error('❌ Erreur lors de la remise à zéro des compteurs:', error);
   }
 }
+
+/**
+ * Vérifie et corrige les abonnements expirés.
+ */
+async function checkExpiredSubscriptions() {
+  console.log(`[${new Date().toISOString()}] 📅 Vérification des abonnements expirés...`);
+  try {
+    const now = admin.firestore.Timestamp.now();
+    const expiredQuery = db.collection('subscriptions')
+      .where('status', '==', 'active')
+      .where('endDate', '<', now);
+
+    const expiredSnapshot = await expiredQuery.get();
+    const batch = db.batch();
+
+    for (const doc of expiredSnapshot.docs) {
+      batch.update(doc.ref, { status: 'expired' });
+      console.log(`📅 Abonnement expiré mis à jour: ${doc.id}`);
+    }
+
+    if (expiredSnapshot.size > 0) {
+      await batch.commit();
+      console.log(`✅ ${expiredSnapshot.size} abonnements marqués comme expirés.`);
+    } else {
+      console.log(`✅ Aucun abonnement expiré trouvé.`);
+    }
+  } catch (error) {
+    console.error('❌ Erreur lors de la vérification des abonnements expirés:', error);
+  }
+}
+
+/**
+ * Recalcule et corrige les dates de fin d'abonnement si nécessaire.
+ */
+async function fixSubscriptionEndDates() {
+  console.log(`[${new Date().toISOString()}] 🔧 Vérification des dates de fin d'abonnement...`);
+  try {
+    const subscriptionsSnapshot = await db.collection('subscriptions').get();
+    const batch = db.batch();
+    let fixedCount = 0;
+
+    for (const doc of subscriptionsSnapshot.docs) {
+      const data = doc.data();
+      const startDate = data.startDate?.toDate();
+      const endDate = data.endDate?.toDate();
+
+      if (startDate && endDate) {
+        // Vérifier si la durée est exactement de 30 jours
+        const durationDays = Math.round((endDate - startDate) / (1000 * 60 * 60 * 24));
+
+        if (durationDays !== 30) {
+          console.log(`🔧 Abonnement ${doc.id}: durée actuelle ${durationDays} jours, correction à 30 jours`);
+          const correctEndDate = new Date(startDate);
+          correctEndDate.setDate(correctEndDate.getDate() + 30);
+
+          batch.update(doc.ref, {
+            endDate: admin.firestore.Timestamp.fromDate(correctEndDate)
+          });
+          fixedCount++;
+        }
+      }
+    }
+
+    if (fixedCount > 0) {
+      await batch.commit();
+      console.log(`✅ ${fixedCount} dates de fin d'abonnement corrigées.`);
+    } else {
+      console.log(`✅ Toutes les dates de fin d'abonnement sont correctes.`);
+    }
+  } catch (error) {
+    console.error('❌ Erreur lors de la correction des dates d\'abonnement:', error);
+  }
+}
+
+/**
+ * Affiche les statistiques des abonnements pour le débogage.
+ */
+async function showSubscriptionStats() {
+  console.log(`[${new Date().toISOString()}] 📊 Statistiques des abonnements...`);
+  try {
+    const subscriptionsSnapshot = await db.collection('subscriptions').get();
+    const countersSnapshot = await db.collection('user_counters').get();
+
+    console.log(`📊 Total abonnements: ${subscriptionsSnapshot.size}`);
+    console.log(`📊 Total compteurs: ${countersSnapshot.size}`);
+
+    let activeCount = 0;
+    let expiredCount = 0;
+
+    subscriptionsSnapshot.forEach(doc => {
+      const data = doc.data();
+      if (data.status === 'active') activeCount++;
+      if (data.status === 'expired') expiredCount++;
+    });
+
+    console.log(`📊 Abonnements actifs: ${activeCount}`);
+    console.log(`📊 Abonnements expirés: ${expiredCount}`);
+
+    // Afficher quelques exemples
+    console.log(`\n📋 Exemples d'abonnements:`);
+    let count = 0;
+    subscriptionsSnapshot.forEach(doc => {
+      if (count < 3) {
+        const data = doc.data();
+        const endDate = data.endDate?.toDate();
+        const daysLeft = endDate ? Math.ceil((endDate - new Date()) / (1000 * 60 * 60 * 24)) : 'N/A';
+        console.log(`  - ${doc.id}: ${data.planType} (${data.status}) - Jours restants: ${daysLeft}`);
+        count++;
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Erreur lors de l\'affichage des statistiques:', error);
+  }
+}
+
+/**
+ * Calcule la distance entre deux points GPS en utilisant la formule de Haversine.
+ */
+function calculateDistance(lat1, lng1, lat2, lng2) {
+  const earthRadius = 6371; // Rayon de la Terre en km
+  const dLat = (lat2 - lat1) * (Math.PI / 180);
+  const dLng = (lng2 - lng1) * (Math.PI / 180);
+  const lat1Rad = lat1 * (Math.PI / 180);
+  const lat2Rad = lat2 * (Math.PI / 180);
+
+  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1Rad) * Math.cos(lat2Rad) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return earthRadius * c;
+}
+
+/**
+ * Trouve le livreur le plus proche disponible pour une livraison.
+ */
+async function findNearestCourier(boutiqueLat, boutiqueLng) {
+  try {
+    // Récupérer tous les livreurs disponibles
+    const couriersSnapshot = await db.collection('couriers')
+      .where('status', '==', 'available')
+      .get();
+
+    if (couriersSnapshot.empty) {
+      return null;
+    }
+
+    let nearestCourier = null;
+    let shortestDistance = Infinity;
+
+    for (const doc of couriersSnapshot.docs) {
+      const courier = doc.data();
+
+      // Vérifier les horaires de travail
+      const now = new Date();
+      const dayOfWeek = now.toLocaleLowerCase('fr', { weekday: 'long' });
+      const horaires = courier.horaires?.[dayOfWeek];
+
+      if (!horaires?.actif) continue;
+
+      const currentTime = now.getHours() * 100 + now.getMinutes();
+      const startTime = parseInt(horaires.debut.replace(':', ''));
+      const endTime = parseInt(horaires.fin.replace(':', ''));
+
+      if (currentTime < startTime || currentTime > endTime) continue;
+
+      // Calculer la distance
+      const courierLat = courier.currentPosition?.latitude;
+      const courierLng = courier.currentPosition?.longitude;
+
+      if (!courierLat || !courierLng) continue;
+
+      const distance = calculateDistance(boutiqueLat, boutiqueLng, courierLat, courierLng);
+
+      // Distance maximale de 20km
+      if (distance <= 20 && distance < shortestDistance) {
+        shortestDistance = distance;
+        nearestCourier = { id: doc.id, ...courier, distance };
+      }
+    }
+
+    return nearestCourier;
+  } catch (error) {
+    console.error('❌ Erreur lors de la recherche du livreur le plus proche:', error);
+    return null;
+  }
+}
+
+// ========================
+// === ROUTE LIVRAISON ===
+// ========================
+
+/**
+ * Route pour assigner automatiquement un livreur à une livraison.
+ * Reçoit les détails de la commande et assigne le livreur le plus proche.
+ */
+app.post('/assign-delivery', async (req, res) => {
+  const {
+    boutiqueId,
+    clientId,
+    boutiquePosition,
+    clientPosition,
+    orderDetails
+  } = req.body;
+
+  // ✅ 1. Validation des données d'entrée
+  if (!boutiqueId || !clientId || !boutiquePosition || !clientPosition || !orderDetails) {
+    return res.status(400).json({
+      error: 'boutiqueId, clientId, boutiquePosition, clientPosition et orderDetails sont requis.'
+    });
+  }
+
+  // ✅ 2. Bloc try...catch global
+  try {
+    const boutiqueLat = boutiquePosition.latitude || boutiquePosition.lat;
+    const boutiqueLng = boutiquePosition.longitude || boutiquePosition.lng;
+    const clientLat = clientPosition.latitude || clientPosition.lat;
+    const clientLng = clientPosition.longitude || clientPosition.lng;
+
+    if (!boutiqueLat || !boutiqueLng || !clientLat || !clientLng) {
+      return res.status(400).json({ error: 'Coordonnées GPS invalides.' });
+    }
+
+    // Calculer la distance et le coût
+    const distanceKm = calculateDistance(boutiqueLat, boutiqueLng, clientLat, clientLng);
+    const cost = distanceKm <= 1 ? 500 : 500 + ((distanceKm - 1) * 100);
+
+    // Trouver le livreur le plus proche
+    const nearestCourier = await findNearestCourier(boutiqueLat, boutiqueLng);
+
+    if (!nearestCourier) {
+      return res.status(404).json({
+        error: 'Aucun livreur disponible trouvé dans un rayon de 20km.',
+        distance: distanceKm
+      });
+    }
+
+    // Créer la livraison dans Firestore
+    const deliveryData = {
+      id: `delivery_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+      boutiqueId,
+      clientId,
+      courierId: nearestCourier.id,
+      status: 'assigned',
+      boutiquePosition: new admin.firestore.GeoPoint(boutiqueLat, boutiqueLng),
+      clientPosition: new admin.firestore.GeoPoint(clientLat, clientLng),
+      distanceKm,
+      cost,
+      orderDetails,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      assignedAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+
+    const deliveryRef = db.collection('delivery_orders').doc(deliveryData.id);
+    await deliveryRef.set(deliveryData);
+
+    // Mettre à jour le statut du livreur
+    await db.collection('couriers').doc(nearestCourier.id).update({
+      status: 'busy',
+      currentDeliveryId: deliveryData.id
+    });
+
+    // Envoyer notification au livreur
+    const courierDoc = await db.collection('couriers').doc(nearestCourier.id).get();
+    const courierData = courierDoc.data();
+
+    if (courierData?.token) {
+      try {
+        await admin.messaging().send({
+          notification: {
+            title: '🛵 Nouvelle livraison disponible',
+            body: `Commande assignée - Distance: ${distanceKm.toFixed(1)}km`
+          },
+          token: courierData.token,
+        });
+        console.log(`✅ Notification envoyée au livreur ${nearestCourier.id}`);
+      } catch (notifError) {
+        console.error(`❌ Erreur notification livreur:`, notifError);
+      }
+    }
+
+    // ✅ 3. Réponse de succès
+    return res.status(200).json({
+      success: true,
+      deliveryId: deliveryData.id,
+      courierId: nearestCourier.id,
+      courierName: `${nearestCourier.prenom} ${nearestCourier.nom}`,
+      distance: distanceKm,
+      cost: cost,
+      estimatedTime: Math.round(distanceKm * 3), // Estimation simple: 3 min/km
+    });
+
+  } catch (error) {
+    console.error('❌ Erreur lors de l\'assignation de la livraison:', error);
+    return res.status(500).json({ error: 'Une erreur interne est survenue.' });
+  }
+});
 // ========================
 // === TÂCHES PLANIFIÉES ===
 // ========================
@@ -1085,16 +1382,26 @@ app.listen(PORT, () => {
   cleanupExpiredStories();
   setInterval(cleanupExpiredStories, 60 * 60 * 1000); // 1 heure
 
-  // Tâches abonnements
-  sendSubscriptionReminders();
-  setInterval(sendSubscriptionReminders, 24 * 60 * 60 * 1000); // Tous les jours
+  // Tâches abonnements quotidiennes
+  const runDailySubscriptionTasks = async () => {
+    console.log('🔄 Exécution des tâches quotidiennes d\'abonnement...');
+    await resetDailyCounters();
+    await checkExpiredSubscriptions();
+    await fixSubscriptionEndDates();
+    await sendSubscriptionReminders();
+  };
 
-  // Remise à zéro des compteurs quotidiens à minuit
+  // Exécuter immédiatement au démarrage
+  runDailySubscriptionTasks();
+
+  // Planifier l'exécution quotidienne à minuit
   const now = new Date();
   const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0, 0);
   const timeToMidnight = midnight - now;
+
   setTimeout(() => {
-    resetDailyCounters();
-    setInterval(resetDailyCounters, 24 * 60 * 60 * 1000); // Tous les jours à minuit
+    runDailySubscriptionTasks();
+    // Répéter tous les jours à minuit
+    setInterval(runDailySubscriptionTasks, 24 * 60 * 60 * 1000);
   }, timeToMidnight);
 });
