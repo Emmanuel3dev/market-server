@@ -1292,20 +1292,42 @@ app.post('/assign-delivery', async (req, res) => {
       });
     }
 
-    // Créer la livraison dans Firestore
+    // Récupérer les informations complètes du client
+    const clientDoc = await db.collection('user').doc(clientId).get();
+    const clientData = clientDoc.exists ? clientDoc.data() : {};
+
+    // Récupérer les informations complètes de la boutique
+    const boutiqueDoc = await db.collection('categories').doc(orderDetails.categorieId)
+      .collection('boutiques').doc(boutiqueId).get();
+    const boutiqueData = boutiqueDoc.exists ? boutiqueDoc.data() : {};
+
+    // Créer la livraison dans Firestore avec toutes les informations
     const deliveryData = {
       id: `delivery_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+      orderId: orderDetails.commandeId,
       boutiqueId,
+      boutiqueName: boutiqueData.nom || 'Boutique',
+      boutiqueIconUrl: boutiqueData.imageUrl || '',
+      boutiquePhone: boutiqueData.telephone || '',
       clientId,
+      clientName: clientData.Name || 'Client',
+      clientAddress: clientData.adresse || 'Adresse inconnue',
+      clientPhone: clientData.telephone || '',
       courierId: nearestCourier.id,
+      courierName: `${nearestCourier.prenom} ${nearestCourier.nom}`,
+      courierPhone: nearestCourier.telephone || '',
+      courierPhotoUrl: nearestCourier.photoUrl || '',
       status: 'assigned',
-      boutiquePosition: new admin.firestore.GeoPoint(boutiqueLat, boutiqueLng),
-      clientPosition: new admin.firestore.GeoPoint(clientLat, clientLng),
+      shopLat: boutiqueLat,
+      shopLng: boutiqueLng,
+      clientLat: clientLat,
+      clientLng: clientLng,
       distanceKm,
       cost,
       orderDetails,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       assignedAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     };
 
     const deliveryRef = db.collection('delivery_orders').doc(deliveryData.id);
