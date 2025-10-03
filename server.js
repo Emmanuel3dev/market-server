@@ -1339,22 +1339,51 @@ app.post('/assign-delivery', async (req, res) => {
       currentDeliveryId: deliveryData.id
     });
 
-    // Envoyer notification au livreur
+    // Envoyer notification enrichie au livreur (cohérente avec le système Flutter)
     const courierDoc = await db.collection('couriers').doc(nearestCourier.id).get();
     const courierData = courierDoc.data();
 
     if (courierData?.token) {
       try {
-        await admin.messaging().send({
+        // Vérifier si le client a un abonnement livraison
+        let clientHasDeliverySubscription = false;
+        if (clientId) {
+          const subQuery = await db.collection('subscriptions')
+            .where('userId', '==', clientId)
+            .where('status', '==', 'active')
+            .get();
+          clientHasDeliverySubscription = !subQuery.empty;
+        }
+
+        // Créer le contenu enrichi de la notification
+        const enrichedNotification = {
           notification: {
             title: '🛵 Nouvelle livraison disponible',
-            body: `Commande assignée - Distance: ${distanceKm.toFixed(1)}km`
+            body: `${orderDetails.nomProduit || 'Produit'} pour ${clientData.Name || 'Client'}\n` +
+                  `📍 ${boutiqueData.nom || 'Boutique'} → Client\n` +
+                  `📏 ${distanceKm.toFixed(1)} km\n` +
+                  `${clientHasDeliverySubscription ? '💎 Client abonné livraison' : '💳 Paiement à la livraison'}`
+          },
+          data: {
+            type: 'courier_new_delivery',
+            orderId: deliveryData.id,
+            clientName: clientData.Name || 'Client',
+            productName: orderDetails.nomProduit || 'Produit',
+            distance: distanceKm.toString(),
+            boutiqueName: boutiqueData.nom || 'Boutique',
+            clientHasSubscription: clientHasDeliverySubscription.toString(),
+            shopLat: boutiqueLat.toString(),
+            shopLng: boutiqueLng.toString(),
+            clientLat: clientLat.toString(),
+            clientLng: clientLng.toString(),
           },
           token: courierData.token,
-        });
-        console.log(`✅ Notification envoyée au livreur ${nearestCourier.id}`);
+        };
+
+        await admin.messaging().send(enrichedNotification);
+        console.log(`✅ Notification enrichie envoyée au livreur ${nearestCourier.id}`);
       } catch (notifError) {
-        console.error(`❌ Erreur notification livreur:`, notifError);
+        console.error(`❌ Erreur notification enrichie livreur:`, notifError);
       }
     }
 
